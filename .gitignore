@@ -1,0 +1,13 @@
+# Local credentials (CRITICAL)
+ServiceAccountKey.json
+serviceaccount.json
+*.json
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# OS metadata
+.DS_Store
+Thumbs.db
