@@ -1,12 +1,22 @@
 import asyncio
 from fastapi import FastAPI, Query
 from typing import List, Dict
+import os
 from google.cloud import firestore
+
+# LOGIC: If we are in the cloud, use the built-in identity. 
+# If we are local, look for the JSON file.
+if os.environ.get('K_SERVICE'):
+    # We are in Google Cloud
+    db = firestore.AsyncClient()
+else:
+    # We are local
+    db = firestore.AsyncClient.from_service_account_json("ServiceAccountKey.json")
 
 app = FastAPI(title="Recommendation Machine API")
 
 # Initialize Firestore Client (Async)
-db = firestore.AsyncClient()
+#db = firestore.AsyncClient()
 
 async def get_item_model(subject_key: str):
     """Retrieves a single item's co-purchase data from Firestore."""
