@@ -3,6 +3,8 @@ from fastapi import FastAPI, Query
 from typing import List, Dict
 import os
 from google.cloud import firestore
+from fastapi.middleware.cors import CORSMiddleware
+
 
 # LOGIC: If we are in the cloud, use the built-in identity. 
 # If we are local, look for the JSON file.
@@ -15,6 +17,13 @@ else:
 
 app = FastAPI(title="Recommendation Machine API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, you can change this to your Vercel URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Initialize Firestore Client (Async)
 #db = firestore.AsyncClient()
 
