@@ -1,29 +1,21 @@
 import asyncio
 import os
+import time
 from typing import List, Dict
-from fastapi import FastAPI, Query, HTTPException, Security, Depends, status, Request, Header
+from fastapi import FastAPI, Query, HTTPException, Request, Security
 from fastapi.security.api_key import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import firestore
 from cachetools import TTLCache
-import time 
 
-# --- 1. ARCHITECT'S INFRASTRUCTURE ---
-app = FastAPI(title="SmartRecs Ultra-Low Latency API")
+#from fastapi import FastAPI, Query, HTTPException, Security, Depends, status, Request, Header
 
-# Use ADC (Application Default Credentials) set up via gcloud auth
-db = firestore.AsyncClient(project="recommendation-machine-f393e")
 
-# CACHE: Store API keys in RAM for 1 hour to eliminate DB round-trips for Auth
-# Key: StoreName (e.g., "ABC"), Value: {api_key: "...", status: "active"}
-auth_cache = TTLCache(maxsize=5000, ttl=3600)
+app = FastAPI(title="SmartRecs Hub - Explicit Architecture")
 
-# NEW: Cache for Model Data (5 minutes)
-# We cache the actual recommendation results for high-traffic items
-model_cache = TTLCache(maxsize=10000, ttl=300) 
-
-SYSTEM_DOMAINS = ["localhost", "127.0.0.1", "smartrecshub.com", "www.smartrecshub.com"]
-
-#api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+# --- 1. INFRASTRUCTURE ---
+PROJECT_ID = "recommendation-machine-f393e"
+db = firestore.AsyncClient(project=PROJECT_ID)
 
 api_key_header = APIKeyHeader(
     name="X-API-KEY", 
@@ -31,72 +23,117 @@ api_key_header = APIKeyHeader(
     description="Enter your SmartRecs API Key (e.g., sr_live_777)"
 )
 
-# --- 1. TRIPLE CACHE INFRASTRUCTURE ---
-# Cache 1: API_KEY -> {store_name, online_url, status} (1hr)
+# Triple Cache remains the same (Memory efficiency is key)
 identity_cache = TTLCache(maxsize=10000, ttl=3600)
-
-# Cache 2: Full Item ID (e.g., ABC#coke) -> Rec Model (10min)
 model_cache = TTLCache(maxsize=20000, ttl=600)
 
-# --- 2. THE IDENTITY & SECURITY GATE ---
-async def verify_access(
-    request: Request, 
-    x_api_key: str = Security(api_key_header), 
-    referer: str = Header(None)
-):
-    if not x_api_key:
-        raise HTTPException(status_code=401, detail="X-API-KEY missing")
+SYSTEM_DOMAINS = ["localhost", "127.0.0.1", "smartrecshub.com", "www.smartrecshub.com", "recommendation-engine-api-1082432876184.us-central1.run.app" ]
 
-    # A. Point Lookup for Identity (Cache-First)
+# --- 2. THE EXPLICIT GUARD FUNCTION ---
+# We removed the FastAPI-specific 'Security' and 'Header' parameters.
+# Now we simply pass the standard 'request' object.
+async def verify_access_manually(request: Request):
+    """
+    Standard Python function to verify the request. 
+    Explicitly extracts data from the request object.
+    """
+    # A. Manually extract the API Key from headers
+    x_api_key = request.headers.get("X-API-KEY")
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="X-API-KEY header missing")
+
+    # B. Identity & Cache Lookup
     identity = identity_cache.get(x_api_key)
-    
     if not identity:
-        # Direct O(1) fetch using the API Key as the Doc ID
         doc = await db.collection("api_id2store").document(x_api_key).get()
-        
         if not doc.exists:
             raise HTTPException(status_code=403, detail="Invalid API Key")
-        
         identity = doc.to_dict()
-        identity_cache[x_api_key] = identity # Map to RAM
+        identity_cache[x_api_key] = identity
 
-    # B. Enforcement: Subscription Status
+    # C. Status Check
     if identity.get("status") != "active":
         raise HTTPException(status_code=402, detail="Subscription inactive")
 
-    # C. Enforcement: Domain Origin Verification
-    # We allow 'localhost' for your development and testing
-    actual_referer = referer or request.headers.get("referer", "localhost")
+
+    # Ensure actual_referer is a string to avoid 'in' comparison errors
+    
+    # D. Domain Verification
+
+    # Extract the authorized site from the identity document
     authorized_site = identity.get("online_url", "")
 
-    is_system = any(domain in actual_referer for domain in SYSTEM_DOMAINS)
-    is_client = authorized_site in actual_referer if authorized_site else False
+    # 1. Get the referer strictly. If missing, it's an empty string.
+    # Do NOT provide a default like "localhost" here.
+    # e.g.  actual_referer = 'https://www.clientsite.com/page' 
+    # Important to understand that actual_referer can be a full URL, not just a domain.
+    actual_referer = request.headers.get("referer", "")
 
-    if not (is_system or is_client):
+    # 2. Extract our own hostname for the "Self" check
+    #How it is used here: .hostname extracts just the domain name or IP address from that URL.
+    # The breakdown:
+	# .hostname: The specific domain name of your server (e.g., ://example.com or localhost). 
+    # It strips out the protocol (https://) and the port number (like :8000).
+    my_api_hostname = request.base_url.hostname or ""
+
+    # 3. If there is NO referer, we must decide if we allow it.
+    # ARCHITECT'S DECISION: In production, no referer = no entry.
+    if not actual_referer:
+        # Exception: You might want to allow your Hub to call without a referer 
+        # during specific server-to-server tasks, but for /recommend, 
+        # we should be strict.
         raise HTTPException(
             status_code=403, 
-            detail=f"Domain unauthorized. Origin: {actual_referer}"
+            detail="Security Violation: Referer header is missing."
         )
-        
-    # Return the store name for list reconstruction
+
+    # 4. Now perform the substring matching against the list
+    # Because actual_referer is guaranteed to be a real string from the client
+    # 'in' is a substring check, so we need to ensure actual_referer is a string
+    # 'www.smartrecshub.com' in 'https://www.smartrecshub.com/some/path' will return True
+    is_system = any(domain in actual_referer for domain in SYSTEM_DOMAINS)
+    
+    #e.g. 'localhost' in 'http://localhost:8000/page' will return True
+    is_self = my_api_hostname in actual_referer if my_api_hostname else False
+
+    # Client Verification: Check if the referer matches the authorized site
+    # 'www.clientsite.com' in 'https://www.clientsite.com/page' will return True    
+    is_client = authorized_site in actual_referer if authorized_site else False
+
+    # 5. Final Gate
+    if not (is_system or is_self or is_client):
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Domain unauthorized. Origin identified as: {actual_referer}"
+        )
+
+
+    # Return the store_name to be used in the next step
     return identity.get("store_name")
 
-# --- 3. THE RECONSTRUCTION ENGINE ---
+# --- 3. THE CORE ENDPOINT ---
 @app.get("/recommend")
 async def recommend(
-    items: List[str] = Query(...), 
-    store_name: str = Depends(verify_access)
+    request: Request, 
+    items: List[str] = Query(...),
+    _ui_auth: str = Security(api_key_header) 
 ):
-    start_time = time.perf_counter()
+    """
+    The flow is now 100% visible. No hidden parameters.
+    """
+    # STEP 1: CALL THE GUARD EXPLICITLY (The First Line)
+    # This replaces Depends(). If it fails, it raises an exception and stops here.
+    store_name = await verify_access_manually(request)
 
-    # THE MAPPING TRANSFORMATION: Simple ID -> Internal Keyed ID
-    # Example: ['coke'] -> ['ABC#coke']
+    # STEP 2: PROCEED WITH LOGIC
+    start_time = time.perf_counter()
+    
+    # Transformation: Simple ID -> Internal Keyed ID
     internal_keys = [f"{store_name}#{item}" for item in items]
 
     async def fetch_doc(internal_key):
         cached = model_cache.get(internal_key)
         if cached: return cached
-        
         doc = await db.collection("models").document(internal_key).get()
         if doc.exists:
             data = doc.to_dict()
@@ -106,20 +143,6 @@ async def recommend(
 
     # Execute Parallel O(1) Lookups
     results = await asyncio.gather(*[fetch_doc(k) for k in internal_keys])
-    
-
-
-
-
-
-
-
-
-
-
-    # ... Same Merging & Sorting Logic as before ...
-    # (Filtering logic now checks against the original 'items' list)
-    
 
 
  # 2. Aggregation Logic
@@ -150,13 +173,21 @@ async def recommend(
 
     # Calculate execution time in milliseconds
     latency_ms = (time.perf_counter() - start_time) * 1000 
-
+    
+  
     return {
         "store": store_name,
         "latency_ms": round(latency_ms, 2), # Return the key metric
         "recommendations": [{"item": k, "score": v} for k, v in recommendations]
     }
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online", 
+        "version": "1.0.3-security-fix", # Change this string every time you push
+        "message": "Can test from https://recommendation-engine-api-1082432876184.us-central1.run.app/docs. Empty headers are now rejected. Referer must be present for security.  "
+    }
 
 
 if __name__ == "__main__":

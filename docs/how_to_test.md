@@ -87,3 +87,16 @@ To verify the **O(1) Moat**, run three consecutive tests:
 3.  **Run 3 (Wait 5 mins):** Note the latency (Verifies `TTLCache` expiration).
 
 **Architect's Note:** If latency is consistently > 200ms in a local environment, check the physical distance to the GCP project region or check for bottlenecked ISP traffic.
+
+
+local setting
+code
+Bash
+
+curl -X 'GET' 'http://127.0.0.1:8001/recommend?items=coke' \
+  -H 'X-API-KEY: sr_live_777' \
+  -H 'referer: ' 
+
+  the above test must result in 
+              status_code=403, 
+            detail="Security Violation: Referer header is missing."
